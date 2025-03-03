@@ -27,6 +27,8 @@
 #include "debug.h"
 #include "memory.h"
 #include "yabause.h"
+#include <scu.h>
+#include <error.h>
 
 SH2_struct *SSH2=NULL;
 SH2_struct *MSH2=NULL;
@@ -43,6 +45,9 @@ void SCITransmitByte(u8);
 void enableCache(SH2_struct *ctx);
 void disableCache(SH2_struct *ctx);
 void InvalidateCache(SH2_struct *ctx);
+
+static void (*SH2BlockableExec)(SH2_struct *context, u32 cycles);
+static void (*SH2StandardExec)(SH2_struct *context, u32 cycles);
 
 #define CACHE_LOG
 
@@ -131,54 +136,94 @@ void SH2EvaluateInterrupt(SH2_struct *sh) {
 }
 
 
-static void SH2StandardExec(SH2_struct *context, u32 cycles) {
+static void SH2StandardExecFast(SH2_struct *context, u32 cycles) {
   SH2Core->Exec(context, cycles);
 }
 
+static void SH2StandardExecDebug(SH2_struct *context, u32 cycles) {
+  int oldbp = context->bp.inbreakpoint;
+  SH2Core->Exec(context, cycles);
+  if (context->bp.inbreakpoint && !oldbp) {
+    context->bp.BreakpointCallBack(context, 0, &context->bp.BreakpointUserData);
+    context->bp.inbreakpoint = 0;
+  }
+}
+
 static sh2regs_struct oldRegs;
-static void SH2BlockableExec(SH2_struct *context, u32 cycles) {
-  if (context->isAccessingCPUBUS == 0) {
+static void SH2BlockableExecDebug(SH2_struct *context, u32 cycles) {
+  if (context->isBlocked == 0) {
+    int oldbp = context->bp.inbreakpoint;
+    SH2Core->ExecSave(context, cycles, &oldRegs);
+    if (context->bp.inbreakpoint && !oldbp) {
+      context->bp.BreakpointCallBack(context, 0, &context->bp.BreakpointUserData);
+      context->bp.inbreakpoint = 0;
+    }
+  } else {
+    context->cycles += cycles;
+  }
+}
+static void SH2BlockableExecFast(SH2_struct *context, u32 cycles) {
+  if (context->isBlocked == 0) {
     SH2Core->ExecSave(context, cycles, &oldRegs);
   } else {
     context->cycles += cycles;
   }
 }
 
-static void updateSH2BlockedState(SH2_struct *context) {
-  if ((context->blockingMask != 0) && (context->SH2InterruptibleExec != SH2BlockableExec)) {
-    context->SH2InterruptibleExec = SH2BlockableExec;
-  }
-  if ((context->blockingMask == 0) && (context->SH2InterruptibleExec != SH2StandardExec)) {
-    context->SH2InterruptibleExec = SH2StandardExec;
+void SH2SetExecSet(int debug) {
+  if (debug == 0) {
+    SH2BlockableExec = SH2BlockableExecFast;
+    SH2StandardExec = SH2StandardExecFast;
+  } else {
+    SH2BlockableExec = SH2BlockableExecDebug;
+    SH2StandardExec = SH2StandardExecDebug;
   }
 }
 
-void SH2SetCPUConcurrency(SH2_struct *context, u8 mask) {
-  if (mask == A_BUS_ACCESS) {
-    if (context->SH2InterruptibleExec != SH2BlockableExec) {
-      MSH2->isAccessingCPUBUS = 0;
-      SSH2->isAccessingCPUBUS = 0;
-      MSH2->SH2InterruptibleExec = SH2BlockableExec;
-      SSH2->SH2InterruptibleExec = SH2BlockableExec;
-    }
+void SH2UpdateABusAccess(SH2_struct *context, int on) {
+  if (context->isAccessingCPUBUS != on) {
+    context->isAccessingCPUBUS = on;
+    SH2UpdateBlockedState(context);
   }
-  else {
+}
+
+void SH2SetVRamAccess(SH2_struct *context, int mask) {
+  if (!(context->isAccessingVram & mask)) {
+    context->isAccessingVram |= mask;
+    SH2UpdateBlockedState(context);
+  }
+}
+void SH2ClearVRamAccess(SH2_struct *context, int mask) {
+  if (context->isAccessingVram & mask) {
+    context->isAccessingVram &= ~mask;
+    SH2UpdateBlockedState(context);
+  }
+}
+
+static int isDMABlocked(SH2_struct *context) {
+  return (context->isAccessingCPUBUS != 0)&&((context->blockingMask & A_BUS_ACCESS)!=0);
+}
+
+void SH2UpdateBlockedState(SH2_struct *context){
+  context->isBlocked =  (context->isAccessingCPUBUS != 0)||((context->blockingMask & A_BUS_ACCESS)!=0);
+  context->isBlocked |= ((context->isAccessingVram & context->blockingMask)!=0);
+}
+
+void SH2SetCPUConcurrency(SH2_struct *context, u8 mask) {
+  if ((context->SH2InterruptibleExec != SH2BlockableExec) || !(context->blockingMask & mask)) {
     context->blockingMask |= mask;
-    updateSH2BlockedState(context);
+    if (context->blockingMask != 0) context->SH2InterruptibleExec = SH2BlockableExec;
+    if (mask == A_BUS_ACCESS) SH2UpdateABusAccess(context, 0);
+    else SH2ClearVRamAccess(context, mask);
   }
 }
 
 void SH2ClearCPUConcurrency(SH2_struct *context, u8 mask) {
-  if (mask == A_BUS_ACCESS) {
-    if (context->SH2InterruptibleExec != SH2StandardExec) {
-      MSH2->isAccessingCPUBUS = 0;
-      SSH2->isAccessingCPUBUS = 0;
-      MSH2->SH2InterruptibleExec = SH2StandardExec;
-      SSH2->SH2InterruptibleExec = SH2StandardExec;
-    }
-  } else {
+  if ((context->SH2InterruptibleExec != SH2StandardExec) && (context->blockingMask & mask)) {
     context->blockingMask &= ~mask;
-    updateSH2BlockedState(context);
+    if (context->blockingMask == 0) context->SH2InterruptibleExec = SH2StandardExec;
+    if (mask == A_BUS_ACCESS) SH2UpdateABusAccess(context, 0);
+    else SH2ClearVRamAccess(context, mask);
   }
 }
 
@@ -197,7 +242,8 @@ int SH2Init(int coreid)
    MSH2->isslave = 0;
    MSH2->isAccessingCPUBUS = 0;
    MSH2->interruptReturnAddress = 0;
-
+   MSH2->isAccessingVram = 0;
+   MSH2->isBlocked = 0;
 
     MSH2->dma_ch0.CHCR = &MSH2->onchip.CHCR0;
     MSH2->dma_ch0.CHCRM = &MSH2->onchip.CHCR0M;
@@ -225,6 +271,8 @@ int SH2Init(int coreid)
     SSH2->onchip.BCR1 = 0x8000;
     SSH2->isslave = 1;
     SSH2->isAccessingCPUBUS = 0;
+    SSH2->isAccessingVram = 0;
+    SSH2->isBlocked = 0;
 
     SSH2->dma_ch0.CHCR = &SSH2->onchip.CHCR0;
     SSH2->dma_ch0.CHCRM = &SSH2->onchip.CHCR0M;
@@ -322,6 +370,7 @@ CACHE_LOG("%s reset\n", (context==SSH2)?"SSH2":"MSH2" );
    // Internal variables
    context->target_cycles = 0x00000000;
    context->cycles = 0;
+   context->divcycles = 0;
    context->frtcycles = 0;
    context->wdtcycles = 0;
 
@@ -504,8 +553,7 @@ void SH2HandleStepOverOut(SH2_struct *context)
       case SH2ST_STEPOUT: // Step Out
          {
             u16 inst;
-
-            if (context->stepOverOut.levels < 0 && context->regs.PC == context->regs.PR)
+            if ((context->stepOverOut.levels < 0) && (context->regs.PC == context->regs.PR))
             {
                context->stepOverOut.enabled = 0;
                context->stepOverOut.callBack(context, context->regs.PC, (void *)context->stepOverOut.type);
@@ -599,9 +647,10 @@ void SH2SetRegisters(SH2_struct *context, sh2regs_struct * r)
 //////////////////////////////////////////////////////////////////////////////
 
 void SH2WriteNotify(SH2_struct *context, u32 start, u32 length) {
-   if (context == NULL) return;
-   if (SH2Core->WriteNotify)
-      SH2Core->WriteNotify(context, start, length);
+   if (SH2Core->WriteNotify) {
+     SH2Core->WriteNotify(MSH2, start, length);
+     SH2Core->WriteNotify(SSH2, start, length);
+   }
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -876,27 +925,34 @@ u32 FASTCALL OnchipReadLong(SH2_struct *context, u32 addr) {
    {
       case 0x100:
       case 0x120:
+         context->cycles += MAX((int)context->divcycles - (int)context->cycles,0);
          return context->onchip.DVSR;
       case 0x104: // DVDNT
       case 0x124:
+         context->cycles += MAX((int)context->divcycles - (int)context->cycles,0);
          return context->onchip.DVDNTL;
       case 0x108:
       case 0x128:
+         context->cycles += MAX((int)context->divcycles - (int)context->cycles,0);
          return context->onchip.DVCR;
       case 0x10C:
       case 0x12C:
          return context->onchip.VCRDIV;
       case 0x110:
       case 0x130:
+         context->cycles += MAX((int)context->divcycles - (int)context->cycles,0);
          return context->onchip.DVDNTH;
       case 0x114:
       case 0x134:
+         context->cycles += MAX((int)context->divcycles - (int)context->cycles,0);
          return context->onchip.DVDNTL;
       case 0x118: // Acts as a separate register, but is set to the same value
       case 0x138: // as DVDNTH after division
+         context->cycles += MAX((int)context->divcycles - (int)context->cycles,0);
          return context->onchip.DVDNTUH;
       case 0x11C: // Acts as a separate register, but is set to the same value
       case 0x13C: // as DVDNTL after division
+         context->cycles += MAX((int)context->divcycles - (int)context->cycles,0);
          return context->onchip.DVDNTUL;
       case 0x180:
          return context->onchip.SAR0;
@@ -1306,12 +1362,14 @@ void FASTCALL OnchipWriteLong(SH2_struct *context, u32 addr, u32 val)  {
      break;
       case 0x100:
       case 0x120:
+        context->cycles += MAX((int)context->divcycles - (int)context->cycles,0);
          context->onchip.DVSR = val;
          return;
       case 0x104: // 32-bit / 32-bit divide operation
       case 0x124:
       {
          s32 divisor = (s32) context->onchip.DVSR;
+         context->divcycles = context->cycles + 39;
          if (divisor == 0)
          {
             // Regardless of what DVDNTL is set to, the top 3 bits
@@ -1373,6 +1431,7 @@ void FASTCALL OnchipWriteLong(SH2_struct *context, u32 addr, u32 val)  {
          return;
       case 0x110:
       case 0x130:
+         context->cycles += MAX((int)context->divcycles - (int)context->cycles,0);
          context->onchip.DVDNTH = val;
          return;
       case 0x114:
@@ -1381,7 +1440,7 @@ void FASTCALL OnchipWriteLong(SH2_struct *context, u32 addr, u32 val)  {
          s64 dividend = context->onchip.DVDNTH;
          dividend = (s64)(((u64)dividend) << 32);
          dividend |= val;
-
+         context->divcycles = context->cycles + 39;
          if (divisor == 0)
          {
             if (context->onchip.DVDNTH & 0x80000000)
@@ -1432,10 +1491,12 @@ void FASTCALL OnchipWriteLong(SH2_struct *context, u32 addr, u32 val)  {
       }
       case 0x118:
       case 0x138:
+         context->cycles += MAX((int)context->divcycles - (int)context->cycles,0);
          context->onchip.DVDNTUH = val;
          return;
       case 0x11C:
       case 0x13C:
+         context->cycles += MAX((int)context->divcycles - (int)context->cycles,0);
          context->onchip.DVDNTUL = val;
          return;
       case 0x140:
@@ -1591,7 +1652,7 @@ static u8 getLRU(SH2_struct *context, u32 tag, u8 line) {
 }
 
 static inline void CacheWriteThrough(SH2_struct *context, u8* mem, u32 addr, u32 val, u8 size) {
-  context->isAccessingCPUBUS |= A_BUS_ACCESS; //When cpu access CPU-BUs at the same time as SCU, there might be a penalty
+  SH2UpdateABusAccess(context, 1); //When cpu access CPU-BUs at the same time as SCU, there might be a penalty
   switch(size) {
   case 1:
     WriteByteList[(addr >> 16) & 0xFFF](context, mem, addr, val);
@@ -1664,6 +1725,7 @@ void InvalidateCache(SH2_struct *ctx) {
   memset(ctx->cacheTagArray, 0x0, 64*4*sizeof(u32));
   SH2WriteNotify(ctx, 0, 0x1000);
 #endif
+  ctx->cycles += 1;
 }
 
 void enableCache(SH2_struct *context) {
@@ -1735,7 +1797,7 @@ void disableCache(SH2_struct *context) {
 void CacheFetch(SH2_struct *context, u8* memory, u32 addr, u8 way) {
   u8 line = (addr>>4)&0x3F;
   u32 tag = (addr>>10)&0x7FFFF;
-  context->isAccessingCPUBUS |= A_BUS_ACCESS; //When cpu access CPU-BUs at the same time as SCU, there might be a penalty
+  SH2UpdateABusAccess(context, 1); //When cpu access CPU-BUs at the same time as SCU, there might be a penalty
   UpdateLRU(context, line, way);
   context->tagWay[line][tag] = way;
   context->cacheTagArray[line][way] = tag;
@@ -1855,6 +1917,7 @@ void CacheInvalidate(SH2_struct *context,u32 addr){
   if (way <= 0x3) context->cacheTagArray[line][way] = 0x0;
   context->cacheLRU[line] = 0;
 #endif
+  context->cycles += 2;
 }
 
 u32 FASTCALL AddressArrayReadLong(SH2_struct *context,u32 addr) {
@@ -2176,6 +2239,9 @@ void DMATransferCycles(SH2_struct *context, Dmac * dmac, int cycles ){
    int count;
 
    //LOG("sh2 dma src=%08X,dst=%08X,%d type:%d cycle:%d\n", *dmac->SAR, *dmac->DAR, *dmac->TCR, ((*dmac->CHCR & 0x0C00) >> 10), cycles);
+   if (isDMABlocked(context)) {
+     return;
+   }
 
    if (!(*dmac->CHCR & 0x2)) { // TE is not set
       int srcInc;
@@ -2470,7 +2536,6 @@ void SH2DumpHistory(SH2_struct *context){
 
 void SH2SetBreakpointCallBack(SH2_struct *context, void (*func)(void *, u32, void *), void *userdata) {
    context->bp.BreakpointCallBack = func;
-   context->bp.BreakpointUserData = userdata;
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -2569,7 +2634,6 @@ void SH2ClearCodeBreakpoints(SH2_struct *context) {
 
 static u8 FASTCALL SH2MemoryBreakpointReadByte(SH2_struct *sh, u8* mem, u32 addr) {
    int i;
-
    for (i = 0; i < sh->bp.nummemorybreakpoints; i++)
    {
       if (sh->bp.memorybreakpoint[i].addr == (addr & 0x0FFFFFFF))
@@ -2577,8 +2641,8 @@ static u8 FASTCALL SH2MemoryBreakpointReadByte(SH2_struct *sh, u8* mem, u32 addr
          if (sh->bp.BreakpointCallBack && sh->bp.inbreakpoint == 0)
          {
             sh->bp.inbreakpoint = 1;
-            sh->bp.BreakpointCallBack(sh, 0, sh->bp.BreakpointUserData);
-            sh->bp.inbreakpoint = 0;
+            sh->bp.BreakpointUserData.PCAddress = (sh->isDelayed != 0)?sh->isDelayed:sh->regs.PC;
+            sh->bp.BreakpointUserData.BPAddress = addr;
          }
 
          return sh->bp.memorybreakpoint[i].oldreadbyte(sh, mem, addr);
@@ -2591,7 +2655,13 @@ static u8 FASTCALL SH2MemoryBreakpointReadByte(SH2_struct *sh, u8* mem, u32 addr
       if (((sh->bp.memorybreakpoint[i].addr >> 16) & 0xFFF) == ((addr >> 16) & 0xFFF))
          return sh->bp.memorybreakpoint[i].oldreadbyte(sh, mem, addr);
    }
-
+   SH2_struct *otherSH = (sh == MSH2)?SSH2:MSH2;
+   // the breakpoint might have been set for the other core.
+   for (i = 0; i < otherSH->bp.nummemorybreakpoints; i++)
+   {
+      if (((otherSH->bp.memorybreakpoint[i].addr >> 16) & 0xFFF) == ((addr >> 16) & 0xFFF))
+         return otherSH->bp.memorybreakpoint[i].oldreadbyte(sh, mem, addr);
+   }
    return 0;
 }
 
@@ -2599,7 +2669,6 @@ static u8 FASTCALL SH2MemoryBreakpointReadByte(SH2_struct *sh, u8* mem, u32 addr
 
 static u16 FASTCALL SH2MemoryBreakpointReadWord(SH2_struct *sh, u8* mem, u32 addr) {
    int i;
-
    for (i = 0; i < sh->bp.nummemorybreakpoints; i++)
    {
       if (sh->bp.memorybreakpoint[i].addr == (addr & 0x0FFFFFFF))
@@ -2607,10 +2676,9 @@ static u16 FASTCALL SH2MemoryBreakpointReadWord(SH2_struct *sh, u8* mem, u32 add
          if (sh->bp.BreakpointCallBack && sh->bp.inbreakpoint == 0)
          {
             sh->bp.inbreakpoint = 1;
-            sh->bp.BreakpointCallBack(sh, 0, sh->bp.BreakpointUserData);
-            sh->bp.inbreakpoint = 0;
+            sh->bp.BreakpointUserData.PCAddress = (sh->isDelayed != 0)?sh->isDelayed:0Xcafedead;
+            sh->bp.BreakpointUserData.BPAddress = addr;
          }
-
          return sh->bp.memorybreakpoint[i].oldreadword(sh, mem, addr);
       }
    }
@@ -2620,6 +2688,13 @@ static u16 FASTCALL SH2MemoryBreakpointReadWord(SH2_struct *sh, u8* mem, u32 add
    {
       if (((sh->bp.memorybreakpoint[i].addr >> 16) & 0xFFF) == ((addr >> 16) & 0xFFF))
          return sh->bp.memorybreakpoint[i].oldreadword(sh, mem, addr);
+   }
+   SH2_struct *otherSH = (sh == MSH2)?SSH2:MSH2;
+   // the breakpoint might have been set for the other core.
+   for (i = 0; i < otherSH->bp.nummemorybreakpoints; i++)
+   {
+      if (((otherSH->bp.memorybreakpoint[i].addr >> 16) & 0xFFF) == ((addr >> 16) & 0xFFF))
+         return otherSH->bp.memorybreakpoint[i].oldreadword(sh, mem, addr);
    }
    return 0;
 }
@@ -2628,7 +2703,6 @@ static u16 FASTCALL SH2MemoryBreakpointReadWord(SH2_struct *sh, u8* mem, u32 add
 
 static u32 FASTCALL SH2MemoryBreakpointReadLong(SH2_struct *sh, u8* mem, u32 addr) {
    int i;
-
    for (i = 0; i < sh->bp.nummemorybreakpoints; i++)
    {
       if (sh->bp.memorybreakpoint[i].addr == (addr & 0x0FFFFFFF))
@@ -2636,10 +2710,9 @@ static u32 FASTCALL SH2MemoryBreakpointReadLong(SH2_struct *sh, u8* mem, u32 add
          if (sh->bp.BreakpointCallBack && sh->bp.inbreakpoint == 0)
          {
             sh->bp.inbreakpoint = 1;
-            sh->bp.BreakpointCallBack(sh, 0, sh->bp.BreakpointUserData);
-            sh->bp.inbreakpoint = 0;
+            sh->bp.BreakpointUserData.PCAddress = (sh->isDelayed != 0)?sh->isDelayed:sh->regs.PC;
+            sh->bp.BreakpointUserData.BPAddress = addr;
          }
-
          return sh->bp.memorybreakpoint[i].oldreadlong(sh, mem, addr);
       }
    }
@@ -2649,6 +2722,13 @@ static u32 FASTCALL SH2MemoryBreakpointReadLong(SH2_struct *sh, u8* mem, u32 add
    {
       if (((sh->bp.memorybreakpoint[i].addr >> 16) & 0xFFF) == ((addr >> 16) & 0xFFF))
          return sh->bp.memorybreakpoint[i].oldreadlong(sh, mem, addr);
+   }
+   SH2_struct *otherSH = (sh == MSH2)?SSH2:MSH2;
+   // the breakpoint might have been set for the other core.
+   for (i = 0; i < otherSH->bp.nummemorybreakpoints; i++)
+   {
+      if (((otherSH->bp.memorybreakpoint[i].addr >> 16) & 0xFFF) == ((addr >> 16) & 0xFFF))
+         return otherSH->bp.memorybreakpoint[i].oldreadlong(sh, mem, addr);
    }
    return 0;
 }
@@ -2657,7 +2737,8 @@ static u32 FASTCALL SH2MemoryBreakpointReadLong(SH2_struct *sh, u8* mem, u32 add
 
 static void FASTCALL SH2MemoryBreakpointWriteByte(SH2_struct *sh, u8* mem, u32 addr, u8 val) {
    int i;
-
+   SH2WriteNotify(MSH2, addr, 1);
+   SH2WriteNotify(SSH2, addr, 1);
    for (i = 0; i < sh->bp.nummemorybreakpoints; i++)
    {
       if (sh->bp.memorybreakpoint[i].addr == (addr & 0x0FFFFFFF))
@@ -2665,8 +2746,8 @@ static void FASTCALL SH2MemoryBreakpointWriteByte(SH2_struct *sh, u8* mem, u32 a
          if (sh->bp.BreakpointCallBack && sh->bp.inbreakpoint == 0)
          {
             sh->bp.inbreakpoint = 1;
-            sh->bp.BreakpointCallBack(sh, 0, sh->bp.BreakpointUserData);
-            sh->bp.inbreakpoint = 0;
+            sh->bp.BreakpointUserData.PCAddress = (sh->isDelayed != 0)?sh->isDelayed:sh->regs.PC;
+            sh->bp.BreakpointUserData.BPAddress = addr;
          }
 
          sh->bp.memorybreakpoint[i].oldwritebyte(sh, mem, addr, val);
@@ -2682,6 +2763,16 @@ static void FASTCALL SH2MemoryBreakpointWriteByte(SH2_struct *sh, u8* mem, u32 a
          sh->bp.memorybreakpoint[i].oldwritebyte(sh, mem, addr, val);
          return;
       }
+   }
+   SH2_struct *otherSH = (sh == MSH2)?SSH2:MSH2;
+   // the breakpoint might have been set for the other core.
+   for (i = 0; i < otherSH->bp.nummemorybreakpoints; i++)
+   {
+     if (((otherSH->bp.memorybreakpoint[i].addr >> 16) & 0xFFF) == ((addr >> 16) & 0xFFF))
+     {
+        otherSH->bp.memorybreakpoint[i].oldwritebyte(sh, mem, addr, val);
+        return;
+     }
    }
 }
 
@@ -2689,7 +2780,8 @@ static void FASTCALL SH2MemoryBreakpointWriteByte(SH2_struct *sh, u8* mem, u32 a
 
 static void FASTCALL SH2MemoryBreakpointWriteWord(SH2_struct *sh, u8* mem, u32 addr, u16 val) {
    int i;
-
+    SH2WriteNotify(MSH2, addr, 2);
+    SH2WriteNotify(SSH2, addr, 2);
    for (i = 0; i < sh->bp.nummemorybreakpoints; i++)
    {
       if (sh->bp.memorybreakpoint[i].addr == (addr & 0x0FFFFFFF))
@@ -2697,8 +2789,8 @@ static void FASTCALL SH2MemoryBreakpointWriteWord(SH2_struct *sh, u8* mem, u32 a
          if (sh->bp.BreakpointCallBack && sh->bp.inbreakpoint == 0)
          {
             sh->bp.inbreakpoint = 1;
-            sh->bp.BreakpointCallBack(sh, 0, sh->bp.BreakpointUserData);
-            sh->bp.inbreakpoint = 0;
+            sh->bp.BreakpointUserData.PCAddress = (sh->isDelayed != 0)?sh->isDelayed:sh->regs.PC;
+            sh->bp.BreakpointUserData.BPAddress = addr;
          }
 
          sh->bp.memorybreakpoint[i].oldwriteword(sh, mem, addr, val);
@@ -2714,6 +2806,16 @@ static void FASTCALL SH2MemoryBreakpointWriteWord(SH2_struct *sh, u8* mem, u32 a
          sh->bp.memorybreakpoint[i].oldwriteword(sh, mem, addr, val);
          return;
       }
+   }
+   SH2_struct *otherSH = (sh == MSH2)?SSH2:MSH2;
+   // the breakpoint might have been set for the other core.
+   for (i = 0; i < otherSH->bp.nummemorybreakpoints; i++)
+   {
+     if (((otherSH->bp.memorybreakpoint[i].addr >> 16) & 0xFFF) == ((addr >> 16) & 0xFFF))
+     {
+        otherSH->bp.memorybreakpoint[i].oldwriteword(sh, mem, addr, val);
+        return;
+     }
    }
 }
 
@@ -2721,7 +2823,8 @@ static void FASTCALL SH2MemoryBreakpointWriteWord(SH2_struct *sh, u8* mem, u32 a
 
 static void FASTCALL SH2MemoryBreakpointWriteLong(SH2_struct *sh, u8* mem, u32 addr, u32 val) {
    int i;
-
+   SH2WriteNotify(MSH2, addr, 4);
+   SH2WriteNotify(SSH2, addr, 4);
    for (i = 0; i < sh->bp.nummemorybreakpoints; i++)
    {
       if (sh->bp.memorybreakpoint[i].addr == (addr & 0x0FFFFFFF))
@@ -2729,8 +2832,8 @@ static void FASTCALL SH2MemoryBreakpointWriteLong(SH2_struct *sh, u8* mem, u32 a
          if (sh->bp.BreakpointCallBack && sh->bp.inbreakpoint == 0)
          {
             sh->bp.inbreakpoint = 1;
-            sh->bp.BreakpointCallBack(sh, 0, sh->bp.BreakpointUserData);
-            sh->bp.inbreakpoint = 0;
+            sh->bp.BreakpointUserData.PCAddress = (sh->isDelayed != 0)?sh->isDelayed:sh->regs.PC;
+            sh->bp.BreakpointUserData.BPAddress = addr;
          }
 
          sh->bp.memorybreakpoint[i].oldwritelong(sh, mem, addr, val);
@@ -2746,6 +2849,16 @@ static void FASTCALL SH2MemoryBreakpointWriteLong(SH2_struct *sh, u8* mem, u32 a
          sh->bp.memorybreakpoint[i].oldwritelong(sh, mem, addr, val);
          return;
       }
+   }
+   SH2_struct *otherSH = (sh == MSH2)?SSH2:MSH2;
+   // the breakpoint might have been set for the other core.
+   for (i = 0; i < otherSH->bp.nummemorybreakpoints; i++)
+   {
+     if (((otherSH->bp.memorybreakpoint[i].addr >> 16) & 0xFFF) == ((addr >> 16) & 0xFFF))
+     {
+        otherSH->bp.memorybreakpoint[i].oldwritelong(sh, mem, addr, val);
+        return;
+     }
    }
 }
 

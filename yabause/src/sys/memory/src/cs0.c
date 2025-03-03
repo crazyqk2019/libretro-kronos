@@ -36,6 +36,7 @@ cartridge_struct *CartridgeArea;
 static u8 decryptOn = 0;
 
 #define LOGSTV
+#define LOGBUP
 
 #define DEV_LOG_ADDR 0x1000
 #define DEV_LOG_SIZE 1024
@@ -824,21 +825,33 @@ static void FASTCALL DRAM32MBITCs0WriteLong(SH2_struct *context, UNUSED u8* memo
 
 static u8 FASTCALL DevCs1ReadByte(SH2_struct *context, UNUSED u8* memory, u32 addr)
 {
-   return 0;
+  if (addr == 0xFFFFFF)
+     return CartridgeArea->cartid;
+   if (addr == 0xFFFFF0)
+      return CartridgeArea->cartid;
+  return 0xFF;
 }
 
 //////////////////////////////////////////////////////////////////////////////
 
 static u16 FASTCALL DevCs1ReadWord(SH2_struct *context, UNUSED u8* memory, u32 addr)
 {
-   return 0;
+  if (addr == 0xFFFFFE)
+     return (0xFF00 | CartridgeArea->cartid);
+  if (addr == 0xFFFFF0)
+     return (0xFF00 | CartridgeArea->cartid);
+  return 0xFFFF;
 }
 
 //////////////////////////////////////////////////////////////////////////////
 
 static u32 FASTCALL DevCs1ReadLong(SH2_struct *context, UNUSED u8* memory, u32 addr)
 {
-   return 0;
+  if (addr == 0xFFFFFC)
+     return (0xFF00FF00 | (CartridgeArea->cartid << 16) | CartridgeArea->cartid);
+  if (addr == 0xFFFFF0)
+     return (0xFF00FF00 | (CartridgeArea->cartid << 16) | CartridgeArea->cartid);
+  return 0xFFFFFFFF;
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -891,7 +904,7 @@ static u8 FASTCALL BUP4MBITCs1ReadByte(SH2_struct *context, UNUSED u8* memory, u
 
 static u16 FASTCALL BUP4MBITCs1ReadWord(SH2_struct *context, UNUSED u8* memory, u32 addr)
 {
-   printf("bup\t: BUP4MBIT read word - %08X\n", addr);
+   LOGBUP("bup\t: BUP4MBIT read word - %08X\n", addr);
    return 0;
 }
 
@@ -899,7 +912,7 @@ static u16 FASTCALL BUP4MBITCs1ReadWord(SH2_struct *context, UNUSED u8* memory, 
 
 static u32 FASTCALL BUP4MBITCs1ReadLong(SH2_struct *context, UNUSED u8* memory, u32 addr)
 {
-   printf("bup\t: BUP4MBIT read long - %08X\n", addr);
+   LOGBUP("bup\t: BUP4MBIT read long - %08X\n", addr);
    return 0;
 }
 
@@ -917,14 +930,14 @@ static void FASTCALL BUP4MBITCs1WriteByte(SH2_struct *context, UNUSED u8* memory
 
 static void FASTCALL BUP4MBITCs1WriteWord(SH2_struct *context, UNUSED u8* memory, u32 addr, u16 val)
 {
-   printf("bup\t: BUP4MBIT write word - %08X\n", addr);
+   LOGBUP("bup\t: BUP4MBIT write word - %08X\n", addr);
 }
 
 //////////////////////////////////////////////////////////////////////////////
 
 static void FASTCALL BUP4MBITCs1WriteLong(SH2_struct *context, UNUSED u8* memory, u32 addr, u32 val)
 {
-   printf("bup\t: BUP4MBIT write long - %08X\n", addr);
+   LOGBUP("bup\t: BUP4MBIT write long - %08X\n", addr);
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -945,7 +958,7 @@ static u8 FASTCALL BUP8MBITCs1ReadByte(SH2_struct *context, UNUSED u8* memory, u
 
 static u16 FASTCALL BUP8MBITCs1ReadWord(SH2_struct *context, UNUSED u8* memory, u32 addr)
 {
-   printf("bup\t: BUP8MBIT read word - %08X\n", addr);
+   LOGBUP("bup\t: BUP8MBIT read word - %08X\n", addr);
    return 0;
 }
 
@@ -953,7 +966,7 @@ static u16 FASTCALL BUP8MBITCs1ReadWord(SH2_struct *context, UNUSED u8* memory, 
 
 static u32 FASTCALL BUP8MBITCs1ReadLong(SH2_struct *context, UNUSED u8* memory, u32 addr)
 {
-   printf("bup\t: BUP8MBIT read long - %08X\n", addr);
+   LOGBUP("bup\t: BUP8MBIT read long - %08X\n", addr);
    return 0;
 }
 
@@ -971,14 +984,14 @@ static void FASTCALL BUP8MBITCs1WriteByte(SH2_struct *context, UNUSED u8* memory
 
 static void FASTCALL BUP8MBITCs1WriteWord(SH2_struct *context, UNUSED u8* memory, u32 addr, u16 val)
 {
-   printf("bup\t: BUP8MBIT write word - %08X\n", addr);
+   LOGBUP("bup\t: BUP8MBIT write word - %08X\n", addr);
 }
 
 //////////////////////////////////////////////////////////////////////////////
 
 static void FASTCALL BUP8MBITCs1WriteLong(SH2_struct *context, UNUSED u8* memory, u32 addr, u32 val)
 {
-   printf("bup\t: BUP8MBIT write long - %08X\n", addr);
+   LOGBUP("bup\t: BUP8MBIT write long - %08X\n", addr);
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -999,7 +1012,7 @@ static u8 FASTCALL BUP16MBITCs1ReadByte(SH2_struct *context, UNUSED u8* memory, 
 
 static u16 FASTCALL BUP16MBITCs1ReadWord(SH2_struct *context, UNUSED u8* memory, u32 addr)
 {
-   printf("bup\t: BUP16MBIT read word - %08X\n", addr);
+   LOGBUP("bup\t: BUP16MBIT read word - %08X\n", addr);
    return 0;
 }
 
@@ -1007,7 +1020,7 @@ static u16 FASTCALL BUP16MBITCs1ReadWord(SH2_struct *context, UNUSED u8* memory,
 
 static u32 FASTCALL BUP16MBITCs1ReadLong(SH2_struct *context, UNUSED u8* memory, u32 addr)
 {
-   printf("bup\t: BUP16MBIT read long - %08X\n", addr);
+   LOGBUP("bup\t: BUP16MBIT read long - %08X\n", addr);
    return 0;
 }
 
@@ -1025,14 +1038,14 @@ static void FASTCALL BUP16MBITCs1WriteByte(SH2_struct *context, UNUSED u8* memor
 
 static void FASTCALL BUP16MBITCs1WriteWord(SH2_struct *context, UNUSED u8* memory, u32 addr, u16 val)
 {
-   printf("bup\t: BUP16MBIT write word - %08X\n", addr);
+   LOGBUP("bup\t: BUP16MBIT write word - %08X\n", addr);
 }
 
 //////////////////////////////////////////////////////////////////////////////
 
 static void FASTCALL BUP16MBITCs1WriteLong(SH2_struct *context, UNUSED u8* memory, u32 addr, u32 val)
 {
-   printf("bup\t: BUP16MBIT write long - %08X\n", addr);
+   LOGBUP("bup\t: BUP16MBIT write long - %08X\n", addr);
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -1053,7 +1066,7 @@ static u8 FASTCALL BUP32MBITCs1ReadByte(SH2_struct *context, UNUSED u8* memory, 
 
 static u16 FASTCALL BUP32MBITCs1ReadWord(SH2_struct *context, UNUSED u8* memory, u32 addr)
 {
-   printf("bup\t: BUP32MBIT read word - %08X\n", addr);
+   LOGBUP("bup\t: BUP32MBIT read word - %08X\n", addr);
    return 0;
 }
 
@@ -1061,7 +1074,7 @@ static u16 FASTCALL BUP32MBITCs1ReadWord(SH2_struct *context, UNUSED u8* memory,
 
 static u32 FASTCALL BUP32MBITCs1ReadLong(SH2_struct *context, UNUSED u8* memory, u32 addr)
 {
-   printf("bup\t: BUP32MBIT read long - %08X\n", addr);
+   LOGBUP("bup\t: BUP32MBIT read long - %08X\n", addr);
    return 0;
 }
 
@@ -1079,14 +1092,14 @@ static void FASTCALL BUP32MBITCs1WriteByte(SH2_struct *context, UNUSED u8* memor
 
 static void FASTCALL BUP32MBITCs1WriteWord(SH2_struct *context, UNUSED u8* memory, u32 addr, u16 val)
 {
-   printf("bup\t: BUP32MBIT write word - %08X\n", addr);
+   LOGBUP("bup\t: BUP32MBIT write word - %08X\n", addr);
 }
 
 //////////////////////////////////////////////////////////////////////////////
 
 static void FASTCALL BUP32MBITCs1WriteLong(SH2_struct *context, UNUSED u8* memory, u32 addr, u32 val)
 {
-   printf("bup\t: BUP32MBIT write long - %08X\n", addr);
+   LOGBUP("bup\t: BUP32MBIT write long - %08X\n", addr);
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -1805,4 +1818,3 @@ int CartLoadState(const void * stream, UNUSED int version, int size)
 }
 
 //////////////////////////////////////////////////////////////////////////////
-
